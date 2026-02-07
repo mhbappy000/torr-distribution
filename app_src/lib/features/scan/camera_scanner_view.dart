@@ -22,6 +22,7 @@ class CameraScannerView extends StatefulWidget {
 class _CameraScannerViewState extends State<CameraScannerView> {
   CameraController? _controller;
   late final BarcodeScanner _barcodeScanner;
+
   bool _processing = false;
   DateTime _lastScan = DateTime.fromMillisecondsSinceEpoch(0);
   String? _lastValue;
@@ -29,12 +30,16 @@ class _CameraScannerViewState extends State<CameraScannerView> {
   @override
   void initState() {
     super.initState();
+
+    // Product barcode is alphanumeric in your case, so Code128/Code39 are most common.
     _barcodeScanner = BarcodeScanner(
       formats: const [
         BarcodeFormat.code128,
         BarcodeFormat.code39,
+        // BarcodeFormat.qrCode, // enable if needed later
       ],
     );
+
     _initCamera();
   }
 
@@ -54,16 +59,19 @@ class _CameraScannerViewState extends State<CameraScannerView> {
 
   Future<void> _initCamera() async {
     final cameras = await availableCameras();
+
     final back = cameras.firstWhere(
       (c) => c.lensDirection == CameraLensDirection.back,
       orElse: () => cameras.first,
     );
 
+    // IMPORTANT:
+    // Use NV21 on Android to match the simplified InputImageMetadata approach.
     final controller = CameraController(
       back,
       ResolutionPreset.medium,
       enableAudio: false,
-      imageFormatGroup: ImageFormatGroup.yuv420,
+      imageFormatGroup: ImageFormatGroup.nv21,
     );
 
     await controller.initialize();
@@ -72,67 +80,64 @@ class _CameraScannerViewState extends State<CameraScannerView> {
       if (!widget.isActive) return;
       if (_processing) return;
 
+      // Throttle scans
       final now = DateTime.now();
       if (now.difference(_lastScan).inMilliseconds < 800) return;
 
       _processing = true;
       try {
-        final input = _toInputImage(image, controller.description.sensorOrientation);
-        final barcodes = await _barcodeScanner.processImage(input);
+        final inputImage =
+            _toInputImage(image, controller.description.sensorOrientation);
+
+        final barcodes = await _barcodeScanner.processImage(inputImage);
 
         if (barcodes.isNotEmpty) {
           final raw = barcodes.first.rawValue?.trim();
           if (raw != null && raw.isNotEmpty) {
-            if (_lastValue == raw && now.difference(_lastScan).inMilliseconds < 1200) {
+            // avoid repeated same value quickly
+            if (_lastValue == raw &&
+                now.difference(_lastScan).inMilliseconds < 1200) {
               return;
             }
+
             _lastValue = raw;
             _lastScan = now;
+
             widget.onScanned(raw);
           }
         }
       } catch (_) {
+        // Keep silent for MVP; you can add logs later if needed.
       } finally {
         _processing = false;
       }
     });
 
-    setState(() => _controller = controller);
+    if (mounted) setState(() => _controller = controller);
   }
 
   InputImage _toInputImage(CameraImage image, int sensorRotationDegrees) {
-    final bytes = _concatenatePlanes(image.planes);
+    // Merge planes into one bytes array.
+    final bytesBuilder = BytesBuilder(copy: false);
+    for (final plane in image.planes) {
+      bytesBuilder.add(plane.bytes);
+    }
+    final bytes = bytesBuilder.toBytes();
+
     final size = Size(image.width.toDouble(), image.height.toDouble());
     final rotation = _rotationFromDegrees(sensorRotationDegrees);
-    final format = InputImageFormatValue.fromRawValue(image.format.raw) ?? InputImageFormat.nv21;
 
-    final planeData = image.planes
-        .map(
-          (plane) => InputImagePlaneMetadata(
-            bytesPerRow: plane.bytesPerRow,
-            height: plane.height,
-            width: plane.width,
-          ),
-        )
-        .toList();
-
+    // Newer google_mlkit_commons expects InputImageMetadata without planeData
+    // (plane metadata was removed in a breaking change). [1](https://dev.to/ajmal_hasan/building-a-qr-codebarcode-scanner-app-with-react-native-and-vision-camera-534k)[2](https://deepwiki.com/flutter-ml/google_ml_kit_flutter/3.3-barcode-scanning)
+    // InputImageMetadata signature: size, rotation, format, bytesPerRow. [3](https://www.linkedin.com/pulse/creating-react-native-vision-camera-code-scanner-step-by-step-uafge?tl=en)[1](https://dev.to/ajmal_hasan/building-a-qr-codebarcode-scanner-app-with-react-native-and-vision-camera-534k)
     final metadata = InputImageMetadata(
       size: size,
       rotation: rotation,
-      format: format,
+      format: InputImageFormat.nv21,
       bytesPerRow: image.planes.first.bytesPerRow,
-      planeData: planeData,
     );
 
     return InputImage.fromBytes(bytes: bytes, metadata: metadata);
-  }
-
-  Uint8List _concatenatePlanes(List<Plane> planes) {
-    final allBytes = WriteBuffer();
-    for (final plane in planes) {
-      allBytes.putUint8List(plane.bytes);
-    }
-    return allBytes.done().buffer.asUint8List();
   }
 
   @override
@@ -145,6 +150,7 @@ class _CameraScannerViewState extends State<CameraScannerView> {
   @override
   Widget build(BuildContext context) {
     final controller = _controller;
+
     if (controller == null || !controller.value.isInitialized) {
       return const Center(child: CircularProgressIndicator());
     }
