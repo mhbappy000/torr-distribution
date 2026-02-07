@@ -1,0 +1,2 @@
+task_id,batch_id,barcode,sku,req_qty,preferred_locations
+T001,BATCH001,C012875,TR-NS-MJK-0175,3,Zone-A-BR01-FR-RW06-CL01
